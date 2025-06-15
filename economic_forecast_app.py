@@ -262,7 +262,7 @@ class EconomicForecastApp:
                 if df[col].apply(lambda x: re.match(r'^\d{4}$', str(x)) is not None).all():
                     try:
                         # Преобразуем в дату (1 января указанного года)
-                        df[col] = pd.to_datetime(df[col].astype(str) + pd.offsets.YearBegin(0))
+                        df[col] = pd.to_datetime(df[col].astype(str) + pd.offsets.YearBegin(0)
                         messagebox.showinfo("Авто-преобразование", 
                                            f"Столбец '{col}' был распознан как год и преобразован в дату (1 января)")
                     except:
@@ -425,7 +425,6 @@ class EconomicForecastApp:
             self.data_tree.insert("", "end", values=values)
     
     def run_forecast(self):
-        
         current_data = self.filtered_data if self.filtered_data is not None else self.data
         
         if current_data is None:
@@ -443,63 +442,23 @@ class EconomicForecastApp:
             # Преобразуем целевую переменную
             current_data[target] = self.convert_to_numeric(current_data[target])
             
-            # Сохраняем исходные значения дат для сообщений об ошибках
-            original_dates = current_data[date_col].copy()
-            
-            # Преобразуем даты с улучшенной обработкой форматов
-            date_formats = [
-                '%d-%m-%Y',  # явно добавляем нужный формат
-                '%Y-%m-%d',
-                '%d.%m.%Y',
-                '%m/%d/%Y',
-                '%Y',
-                '%Y-%m',
-                '%d-%b-%Y',
-                '%d-%B-%Y',
-                '%b-%d-%Y',
-                '%B-%d-%Y'
-            ]
-            
-            # Пробуем разные форматы дат
-            converted = False
-            for fmt in date_formats:
+            # Преобразуем даты
+            # Проверяем, является ли столбец датой в формате "только год"
+            if current_data[date_col].dtype == 'int64' and current_data[date_col].between(1800, 2200).all():
+                # Преобразуем год в дату (1 января)
+                current_data[date_col] = pd.to_datetime(current_data[date_col].astype(str), format='%Y')
+            else:
+                # Пробуем автоматическое преобразование
                 try:
-                    current_data.loc[:, date_col] = pd.to_datetime(
-                    current_data[date_col], 
-                    format=fmt, 
-                    errors='raise'
-                )
-                    converted = True
-                    break
-                except (ValueError, TypeError):
-                    continue
-            
-            # Если не удалось преобразовать, пробуем автоматическое определение
-            if not converted:
-                try:
-                    current_data[date_col] = pd.to_datetime(
-                        current_data[date_col], 
-                        errors='coerce',
-                        dayfirst=True  # важный параметр для форматов с днем вначале
-                    )
-                except Exception as e:
-                    messagebox.showerror(
-                        "Ошибка преобразования дат",
-                        f"Не удалось преобразовать даты: {str(e)}\n\n"
-                        "Примеры значений:\n" + 
-                        "\n".join(original_dates.head(5).astype(str).tolist()))
-                    return
-            
-            # Проверяем результат преобразования
-            if current_data[date_col].isnull().any():
-                invalid_dates = original_dates[current_data[date_col].isnull()]
-                messagebox.showwarning(
-                    "Часть дат не распознана",
-                    f"{len(invalid_dates)} значений дат не распознано.\n"
-                    "Примеры:\n" + 
-                    "\n".join(invalid_dates.head(5).astype(str).tolist()) +
-                    "\n\nЭти строки будут удалены."
-                )
+                    current_data[date_col] = pd.to_datetime(current_data[date_col], errors='coerce')
+                except:
+                    # Если не удалось, пробуем разные форматы
+                    for fmt in ['%Y', '%Y-%m', '%Y-%m-%d', '%d.%m.%Y', '%m/%d/%Y']:
+                        try:
+                            current_data[date_col] = current_data[date_col].apply(lambda x: datetime.strptime(str(x), fmt))
+                            break
+                        except:
+                            continue
             
             # Удаляем строки с невалидными датами
             current_data = current_data.dropna(subset=[date_col])
