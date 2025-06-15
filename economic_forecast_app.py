@@ -262,7 +262,7 @@ class EconomicForecastApp:
                 if df[col].apply(lambda x: re.match(r'^\d{4}$', str(x)) is not None).all():
                     try:
                         # Преобразуем в дату (1 января указанного года)
-                        df[col] = pd.to_datetime(df[col].astype(str) + pd.offsets.YearBegin(0)
+                        df[col] = pd.to_datetime(df[col].astype(str) + pd.offsets.YearBegin(0))
                         messagebox.showinfo("Авто-преобразование", 
                                            f"Столбец '{col}' был распознан как год и преобразован в дату (1 января)")
                     except:
