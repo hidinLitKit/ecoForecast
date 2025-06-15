@@ -15,6 +15,7 @@ import tempfile
 import re
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+from sklearn.preprocessing import MinMaxScaler
 
 class EconomicForecastApp:
     def __init__(self, root):
@@ -24,7 +25,6 @@ class EconomicForecastApp:
         
         # Переменные
         self.data = None
-        self.filtered_data = None
         self.target_var = tk.StringVar()
         self.date_var = tk.StringVar()
         self.model_var = tk.StringVar(value="Linear Regression")
@@ -32,11 +32,6 @@ class EconomicForecastApp:
         self.kaggle_api_configured = False
         self.forecast_years = tk.IntVar(value=5)
         self.train_start_year = tk.IntVar(value=2000)
-        
-        # Переменные для фильтрации
-        self.filter_column_var = tk.StringVar()
-        self.filter_value_var = tk.StringVar()
-        self.filter_values = []
         
         # Проверка конфигурации Kaggle API
         self.check_kaggle_config()
@@ -69,8 +64,6 @@ class EconomicForecastApp:
         # Примеры популярных датасетов
         ttk.Label(frame_load, text="Примеры: ").grid(row=0, column=2, padx=5, pady=5, sticky="w")
         examples = [
-             ("unitednations/global-commodity-trade-statistics", "Торговая статистика"),
-            ("dwdkills/russian-demography", "РФ демография"),
             ("varpit94/us-inflation-data-updated-till-may-2021", "Инфляция")
         ]
         
@@ -95,22 +88,6 @@ class EconomicForecastApp:
         self.api_status.pack(side="left", padx=10)
         if not self.kaggle_api_configured:
             self.api_status.configure(foreground="red")
-        
-        # Фрейм фильтрации данных
-        filter_frame = ttk.LabelFrame(frame_load, text="Фильтрация данных")
-        filter_frame.grid(row=2, column=0, columnspan=5, sticky="we", padx=5, pady=5)
-        
-        ttk.Label(filter_frame, text="Колонка для фильтрации:").grid(row=0, column=0, padx=5, pady=5)
-        self.filter_col_combo = ttk.Combobox(filter_frame, textvariable=self.filter_column_var, state="disabled", width=20)
-        self.filter_col_combo.grid(row=0, column=1, padx=5, pady=5)
-        self.filter_col_combo.bind("<<ComboboxSelected>>", self.update_filter_values)
-        
-        ttk.Label(filter_frame, text="Значение:").grid(row=0, column=2, padx=5, pady=5)
-        self.filter_val_combo = ttk.Combobox(filter_frame, textvariable=self.filter_value_var, state="disabled", width=20)
-        self.filter_val_combo.grid(row=0, column=3, padx=5, pady=5)
-        
-        ttk.Button(filter_frame, text="Применить фильтр", command=self.apply_filter).grid(row=0, column=4, padx=5, pady=5)
-        ttk.Button(filter_frame, text="Сбросить фильтр", command=self.reset_filter).grid(row=0, column=5, padx=5, pady=5)
         
         # Фрейм настроек
         frame_settings = ttk.LabelFrame(main_frame, text="Настройки модели")
@@ -178,46 +155,6 @@ class EconomicForecastApp:
         vsb.pack(side="right", fill="y")
         hsb.pack(side="bottom", fill="x")
     
-    def update_filter_values(self, event=None):
-        col = self.filter_column_var.get()
-        if col and self.data is not None:
-            unique_values = self.data[col].unique()
-            self.filter_values = sorted([str(val) for val in unique_values])
-            self.filter_val_combo['values'] = self.filter_values
-            self.filter_val_combo['state'] = 'readonly'
-    
-    def apply_filter(self):
-        filter_col = self.filter_column_var.get()
-        filter_val = self.filter_value_var.get()
-        
-        if not filter_col or not filter_val:
-            messagebox.showwarning("Ошибка", "Выберите колонку и значение для фильтрации!")
-            return
-        
-        try:
-            self.filtered_data = self.data[self.data[filter_col].astype(str) == filter_val]
-            
-            self.target_combo['values'] = list(self.filtered_data.columns)
-            self.date_combo['values'] = list(self.filtered_data.columns)
-            self.show_data_preview()
-            
-            messagebox.showinfo("Фильтр", f"Применен фильтр: {filter_col} = {filter_val}\nОсталось строк: {len(self.filtered_data)}")
-        except Exception as e:
-            messagebox.showerror("Ошибка фильтрации", f"Не удалось применить фильтр: {str(e)}")
-    
-    def reset_filter(self):
-        self.filtered_data = None
-        self.filter_column_var.set('')
-        self.filter_value_var.set('')
-        self.filter_val_combo['state'] = 'disabled'
-        
-        if self.data is not None:
-            self.target_combo['values'] = list(self.data.columns)
-            self.date_combo['values'] = list(self.data.columns)
-            self.show_data_preview()
-        
-        messagebox.showinfo("Фильтр", "Фильтр сброшен")
-    
     def check_and_configure_kaggle(self):
         kaggle_dir = os.path.expanduser('~/.kaggle')
         if not os.path.exists(kaggle_dir):
@@ -253,20 +190,34 @@ class EconomicForecastApp:
         except:
             return s
     
-    def detect_and_convert_year_columns(self, df):
-        """Обнаруживает столбцы, содержащие только годы, и преобразует их в даты"""
+    def detect_and_convert_date_columns(self, df):
+        """Обнаруживает и преобразует столбцы с датами в datetime"""
+        date_formats = [
+            '%Y-%m-%d', '%d-%m-%Y', '%m/%d/%Y', '%Y/%m/%d',
+            '%Y-%m', '%m-%Y', '%Y/%m', '%m/%Y',
+            '%Y', '%d.%m.%Y', '%Y.%m.%d'
+        ]
+        
         for col in df.columns:
-            # Пропускаем столбцы, которые выглядят как даты
-            if any(keyword in col.lower() for keyword in ['date', 'year', 'time']):
-                # Проверяем, содержит ли столбец только 4-значные числа
-                if df[col].apply(lambda x: re.match(r'^\d{4}$', str(x)) is not None).all():
-                    try:
-                        # Преобразуем в дату (1 января указанного года)
-                        df[col] = pd.to_datetime(df[col].astype(str) + pd.offsets.YearBegin(0))
-                        messagebox.showinfo("Авто-преобразование", 
-                                           f"Столбец '{col}' был распознан как год и преобразован в дату (1 января)")
-                    except:
-                        pass
+            # Пропускаем уже преобразованные даты
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                continue
+                
+            # Пробуем разные форматы дат
+            for fmt in date_formats:
+                try:
+                    # Пробуем преобразовать первые 5 значений для проверки
+                    sample = df[col].head(5).astype(str)
+                    parsed = pd.to_datetime(sample, format=fmt, errors='coerce')
+                    
+                    # Проверяем, что все даты успешно преобразованы
+                    if not parsed.isna().all():
+                        # Если успешно, преобразуем весь столбец
+                        df[col] = pd.to_datetime(df[col].astype(str), format=fmt, errors='coerce')
+                        break
+                except:
+                    continue
+        
         return df
     
     def load_csv(self):
@@ -283,21 +234,15 @@ class EconomicForecastApp:
                 else:
                     self.data = pd.read_csv(file_path, encoding='utf-8', errors='replace', parse_dates=False)
                 
-                # Авто-преобразование столбцов с годами в даты
-                self.data = self.detect_and_convert_year_columns(self.data)
+                # Авто-преобразование столбцов с датами
+                self.data = self.detect_and_convert_date_columns(self.data)
                 
                 # Преобразуем числовые столбцы
                 for col in self.data.columns:
-                    if not any(keyword in col.lower() for keyword in ['date', 'year', 'time']):
+                    if not pd.api.types.is_datetime64_any_dtype(self.data[col]):
                         self.data[col] = self.convert_to_numeric(self.data[col])
                 
-                # Сбрасываем фильтр
-                self.reset_filter()
-                
                 # Обновляем элементы интерфейса
-                self.filter_col_combo['values'] = list(self.data.columns)
-                self.filter_col_combo['state'] = 'readonly'
-                
                 self.target_combo['values'] = list(self.data.columns)
                 self.target_combo['state'] = 'readonly'
                 self.date_combo['values'] = list(self.data.columns)
@@ -338,19 +283,15 @@ class EconomicForecastApp:
                     else:
                         self.data = pd.read_csv(file_path, encoding='utf-8', errors='replace', parse_dates=False)
                     
-                    # Авто-преобразование столбцов с годами в даты
-                    self.data = self.detect_and_convert_year_columns(self.data)
+                    # Авто-преобразование столбцов с датами
+                    self.data = self.detect_and_convert_date_columns(self.data)
                     
+                    # Преобразуем числовые столбцы
                     for col in self.data.columns:
-                        if not any(keyword in col.lower() for keyword in ['date', 'year', 'time']):
+                        if not pd.api.types.is_datetime64_any_dtype(self.data[col]):
                             self.data[col] = self.convert_to_numeric(self.data[col])
                     
-                    # Сбрасываем фильтр
-                    self.reset_filter()
-                    
-                    self.filter_col_combo['values'] = list(self.data.columns)
-                    self.filter_col_combo['state'] = 'readonly'
-                    
+                    # Обновляем элементы интерфейса
                     self.target_combo['values'] = list(self.data.columns)
                     self.target_combo['state'] = 'readonly'
                     self.date_combo['values'] = list(self.data.columns)
@@ -365,19 +306,15 @@ class EconomicForecastApp:
                         try:
                             self.data = pd.read_csv(file_path)
                             
-                            # Авто-преобразование столбцов с годами в даты
-                            self.data = self.detect_and_convert_year_columns(self.data)
+                            # Авто-преобразование столбцов с датами
+                            self.data = self.detect_and_convert_date_columns(self.data)
                             
+                            # Преобразуем числовые столбцы
                             for col in self.data.columns:
-                                if not any(keyword in col.lower() for keyword in ['date', 'year', 'time']):
+                                if not pd.api.types.is_datetime64_any_dtype(self.data[col]):
                                     self.data[col] = self.convert_to_numeric(self.data[col])
                             
-                            # Сбрасываем фильтр
-                            self.reset_filter()
-                            
-                            self.filter_col_combo['values'] = list(self.data.columns)
-                            self.filter_col_combo['state'] = 'readonly'
-                            
+                            # Обновляем элементы интерфейса
                             self.target_combo['values'] = list(self.data.columns)
                             self.target_combo['state'] = 'readonly'
                             self.date_combo['values'] = list(self.data.columns)
@@ -410,9 +347,7 @@ class EconomicForecastApp:
     def show_data_preview(self):
         self.data_tree.delete(*self.data_tree.get_children())
         
-        current_data = self.filtered_data if self.filtered_data is not None else self.data
-        
-        columns = list(current_data.columns)
+        columns = list(self.data.columns)
         self.data_tree["columns"] = columns
         self.data_tree["show"] = "headings"
         
@@ -420,14 +355,12 @@ class EconomicForecastApp:
             self.data_tree.heading(col, text=col)
             self.data_tree.column(col, width=100, anchor="center")
         
-        for i, row in current_data.head(100).iterrows():
+        for i, row in self.data.head(100).iterrows():
             values = [str(x) if not pd.isna(x) else "" for x in row]
             self.data_tree.insert("", "end", values=values)
     
     def run_forecast(self):
-        current_data = self.filtered_data if self.filtered_data is not None else self.data
-        
-        if current_data is None:
+        if self.data is None:
             messagebox.showwarning("Ошибка", "Сначала загрузите данные!")
             return
         
@@ -439,72 +372,47 @@ class EconomicForecastApp:
             return
         
         try:
+            # Фильтруем данные, оставляя только нужные столбцы
+            cols_to_keep = [date_col, target]
+            current_data = self.data[cols_to_keep].copy()
+            
             # Преобразуем целевую переменную
             current_data[target] = self.convert_to_numeric(current_data[target])
             
-            # Преобразуем даты
-            # Проверяем, является ли столбец датой в формате "только год"
-            if current_data[date_col].dtype == 'int64' and current_data[date_col].between(1800, 2200).all():
-                # Преобразуем год в дату (1 января)
-                current_data[date_col] = pd.to_datetime(current_data[date_col].astype(str), format='%Y')
-            else:
-                # Пробуем автоматическое преобразование
+            # Проверяем и преобразуем дату
+            if not pd.api.types.is_datetime64_any_dtype(current_data[date_col]):
                 try:
-                    current_data[date_col] = pd.to_datetime(current_data[date_col], errors='coerce')
-                except:
-                    # Если не удалось, пробуем разные форматы
-                    for fmt in ['%Y', '%Y-%m', '%Y-%m-%d', '%d.%m.%Y', '%m/%d/%Y']:
-                        try:
-                            current_data[date_col] = current_data[date_col].apply(lambda x: datetime.strptime(str(x), fmt))
-                            break
-                        except:
-                            continue
+                    # Пробуем несколько форматов дат
+                    current_data[date_col] = pd.to_datetime(
+                        current_data[date_col], 
+                        infer_datetime_format=True,
+                        errors='coerce'
+                    )
+                    
+                    # Если не удалось, пробуем другие форматы
+                    if current_data[date_col].isna().any():
+                        current_data[date_col] = pd.to_datetime(
+                            current_data[date_col], 
+                            format='mixed',
+                            dayfirst=True,
+                            errors='coerce'
+                        )
+                except Exception as e:
+                    messagebox.showerror("Ошибка даты", 
+                                    f"Не удалось преобразовать столбец '{date_col}' в дату.\n"
+                                    f"Убедитесь, что выбрали правильный столбец с датами.\n"
+                                    f"Ошибка: {str(e)}")
+                    return
             
-            # Удаляем строки с невалидными датами
-            current_data = current_data.dropna(subset=[date_col])
+            # Удаляем строки с невалидными датами или значениями
+            current_data = current_data.dropna(subset=[date_col, target])
+            
+            if len(current_data) == 0:
+                messagebox.showerror("Ошибка", "Нет данных для анализа после очистки!")
+                return
             
             # Сортируем по дате
             current_data = current_data.sort_values(by=date_col)
-            
-            # Создаем числовые признаки из даты
-            current_data['year'] = current_data[date_col].dt.year
-            current_data['month'] = current_data[date_col].dt.month
-            current_data['day'] = current_data[date_col].dt.day
-            
-            # Фильтруем данные для обучения по выбранному году
-            start_year = self.train_start_year.get()
-            train_data = current_data[current_data['year'] >= start_year]
-            
-            if len(train_data) == 0:
-                messagebox.showerror("Ошибка", f"Нет данных для обучения, начиная с {start_year} года!")
-                return
-            
-            # Подготовка данных для обучения
-            X_train = train_data[['year', 'month', 'day']]
-            y_train = train_data[target]
-            
-            # Проверяем наличие пропущенных значений
-            if X_train.isnull().any().any() or y_train.isnull().any():
-                messagebox.showwarning("Предупреждение", 
-                                      "В данных есть пропущенные значения! Они будут заполнены средними.")
-                X_train = X_train.fillna(X_train.mean())
-                y_train = y_train.fillna(y_train.mean())
-            
-            # Выбор модели
-            model_name = self.model_var.get()
-            if model_name == "Linear Regression":
-                model = LinearRegression()
-            elif model_name == "Random Forest":
-                model = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=5)
-            elif model_name == "Gradient Boosting":
-                model = GradientBoostingRegressor(n_estimators=100, random_state=42, max_depth=3)
-            
-            # Обучение модели
-            model.fit(X_train, y_train)
-            
-            # Прогноз на будущее
-            forecast_years = self.forecast_years.get()
-            last_date = current_data[date_col].max()
             
             # Определяем частоту данных (годовая, месячная и т.д.)
             freq = 'Y'  # По умолчанию годовая частота
@@ -518,6 +426,70 @@ class EconomicForecastApp:
                         freq = 'M'  # Месячная частота
                     elif common_diff < timedelta(days=365):
                         freq = 'D'  # Дневная частота
+            
+            # Создаем числовые признаки из даты
+            current_data['days_since_start'] = (current_data[date_col] - current_data[date_col].min()).dt.days
+            current_data['year'] = current_data[date_col].dt.year
+            current_data['month'] = current_data[date_col].dt.month
+            current_data['day'] = current_data[date_col].dt.day
+            
+            # Фильтруем данные для обучения по выбранному году
+            start_year = self.train_start_year.get()
+            train_data = current_data[current_data['year'] >= start_year]
+            
+            if len(train_data) == 0:
+                messagebox.showerror("Ошибка", f"Нет данных для обучения, начиная с {start_year} года!")
+                return
+            
+            # Масштабирование данных
+            feature_scaler = MinMaxScaler()
+            target_scaler = MinMaxScaler()
+            
+            features = ['days_since_start', 'year', 'month', 'day']
+            X_train = train_data[features]
+            y_train = train_data[target].values.reshape(-1, 1)
+            
+            # Проверяем наличие пропущенных значений
+            if X_train.isnull().any().any() or pd.isnull(y_train).any():
+                messagebox.showwarning("Предупреждение", 
+                                    "В данных есть пропущенные значения! Они будут заполнены средними.")
+                X_train = X_train.fillna(X_train.mean())
+                y_train = y_train.fillna(y_train.mean())
+            
+            # Масштабирование
+            X_train_scaled = feature_scaler.fit_transform(X_train)
+            y_train_scaled = target_scaler.fit_transform(y_train)
+            
+            # Выбор модели с улучшенными параметрами
+            model_name = self.model_var.get()
+            if model_name == "Linear Regression":
+                model = LinearRegression()
+            elif model_name == "Random Forest":
+                model = RandomForestRegressor(
+                    n_estimators=500, 
+                    random_state=42, 
+                    max_depth=10, 
+                    min_samples_split=5,
+                    min_samples_leaf=2,
+                    max_features='sqrt'
+                )
+            elif model_name == "Gradient Boosting":
+                model = GradientBoostingRegressor(
+                    n_estimators=300, 
+                    random_state=42, 
+                    max_depth=5, 
+                    learning_rate=0.1,
+                    min_samples_split=5,
+                    min_samples_leaf=2,
+                    subsample=0.8
+                )
+            
+            # Обучение модели
+            model.fit(X_train_scaled, y_train_scaled.ravel())
+            
+            # Прогноз на будущее
+            forecast_years = self.forecast_years.get()
+            last_date = current_data[date_col].max()
             
             # Создаем даты для прогноза
             future_dates = []
@@ -534,13 +506,18 @@ class EconomicForecastApp:
             # Создаем данные для прогноза
             future_df = pd.DataFrame({
                 'date': future_dates,
+                'days_since_start': [(d - current_data[date_col].min()).days for d in future_dates],
                 'year': [d.year for d in future_dates],
                 'month': [d.month for d in future_dates],
                 'day': [d.day for d in future_dates]
             })
             
-            X_future = future_df[['year', 'month', 'day']]
-            y_future = model.predict(X_future)
+            X_future = future_df[features]
+            X_future_scaled = feature_scaler.transform(X_future)
+            
+            # Прогнозирование
+            y_future_scaled = model.predict(X_future_scaled)
+            y_future = target_scaler.inverse_transform(y_future_scaled.reshape(-1, 1)).flatten()
             
             # Вывод результатов
             self.text_results.delete(1.0, tk.END)
@@ -548,20 +525,20 @@ class EconomicForecastApp:
             self.text_results.insert(tk.END, f"Целевая переменная: {target}\n")
             self.text_results.insert(tk.END, f"Период обучения: с {start_year} года\n")
             self.text_results.insert(tk.END, f"Размер обучающей выборки: {len(X_train)}\n")
-            self.text_results.insert(tk.END, f"Прогноз на {forecast_years} {'лет' if freq == 'Y' else 'месяцев'}:\n\n")
+            self.text_results.insert(tk.END, f"Прогноз на {forecast_years} лет:\n\n")
             
             for i in range(len(future_dates)):
                 self.text_results.insert(tk.END, f"{future_dates[i].strftime('%Y-%m-%d')}: {y_future[i]:.2f}\n")
             
             # Визуализация
-            self.plot_time_series(date_col, target, train_data, future_dates, y_future, model, model_name, freq)
+            self.plot_time_series(date_col, target, train_data, future_dates, y_future, model, model_name, feature_scaler, target_scaler, features, current_data)
             
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
             messagebox.showerror("Ошибка", f"{str(e)}\n\nДетали ошибки:\n{error_details}")
-    
-    def plot_time_series(self, date_col, target, train_data, future_dates, y_future, model, model_name, freq='Y'):
+
+    def plot_time_series(self, date_col, target, train_data, future_dates, y_future, model, model_name, feature_scaler, target_scaler, features, full_data):
         # Очистка предыдущих графиков
         for widget in self.figure_frame.winfo_children():
             widget.destroy()
@@ -570,9 +547,8 @@ class EconomicForecastApp:
         fig, ax = plt.subplots(figsize=(14, 7))
         
         # Полные исторические данные
-        current_data = self.filtered_data if self.filtered_data is not None else self.data
-        all_dates = current_data[date_col]
-        all_values = current_data[target]
+        all_dates = full_data[date_col]
+        all_values = full_data[target]
         ax.plot(all_dates, all_values, 'o-', color='gray', label="Все исторические данные", alpha=0.5)
         
         # Данные, использованные для обучения
@@ -584,40 +560,22 @@ class EconomicForecastApp:
         ax.plot(future_dates, y_future, 'g--', label="Прогноз на будущее")
         ax.scatter(future_dates, y_future, color='green', s=50)
         
-        # Для линейной регрессии строим всю линию регрессии
-        if model_name == "Linear Regression":
-            min_date = min(all_dates.min(), future_dates[0])
-            max_date = max(all_dates.max(), future_dates[-1])
-            
-            # Создаем последовательность дат с правильной частотой
-            if freq == 'Y':
-                date_range = pd.date_range(start=min_date, end=max_date, freq='YS')
-            elif freq == 'M':
-                date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
-            else:
-                date_range = pd.date_range(start=min_date, end=max_date, freq='D')
-            
-            pred_df = pd.DataFrame({'date': date_range})
-            pred_df['year'] = pred_df['date'].dt.year
-            pred_df['month'] = pred_df['date'].dt.month
-            pred_df['day'] = pred_df['date'].dt.day
-            
-            predictions = model.predict(pred_df[['year', 'month', 'day']])
-            
-            ax.plot(pred_df['date'], predictions, 'r-', label="Линейная регрессия", alpha=0.7)
+        # Для всех моделей строим предсказания на обучающих данных
+        X_train = train_data[features]
+        X_train_scaled = feature_scaler.transform(X_train)
+        train_predictions_scaled = model.predict(X_train_scaled)
+        train_predictions = target_scaler.inverse_transform(train_predictions_scaled.reshape(-1, 1)).flatten()
         
-        # Для других моделей
-        else:
-            train_predictions = model.predict(train_data[['year', 'month', 'day']])
-            ax.plot(train_dates, train_predictions, 'r-', label="Предсказания модели", alpha=0.7)
+        ax.plot(train_dates, train_predictions, 'r-', label="Предсказания модели", alpha=0.7)
+        
+        # Соединяем последнее предсказание с первым прогнозом
+        if len(train_dates) > 0 and len(future_dates) > 0:
+            last_train_date = train_dates.iloc[-1]
+            first_forecast_date = future_dates[0]
+            last_value = train_predictions[-1]
+            first_forecast_value = y_future[0]
             
-            if len(train_dates) > 0 and len(future_dates) > 0:
-                last_train_date = train_dates.iloc[-1]
-                first_forecast_date = future_dates[0]
-                last_value = train_predictions[-1]
-                first_forecast_value = y_future[0]
-                
-                ax.plot([last_train_date, first_forecast_date], [last_value, first_forecast_value], 'r--')
+            ax.plot([last_train_date, first_forecast_date], [last_value, first_forecast_value], 'r--')
         
         # Настройки графика
         ax.set_title(f"Прогнозирование {target} с помощью {model_name}", fontsize=14)
